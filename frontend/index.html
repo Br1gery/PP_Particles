@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Распознавание порошковых частиц на изображении.">
+  <title>Распознавание частиц — PowderScope</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <h1>Распознавание частиц</h1>
+      <p>Загрузите изображение порошка, чтобы найти и выделить частицы.</p>
+    </header>
+
+    <form id="analysis-form" class="upload-card">
+      <label id="drop-zone" class="drop-zone" for="file-input">
+        <input id="file-input" type="file" accept=".jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff,image/jpeg,image/png,image/webp,image/bmp,image/tiff" aria-describedby="file-hint">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V3m0 0L7 8m5-5 5 5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <strong id="upload-title">Выберите изображение или перетащите сюда</strong>
+        <span id="file-hint">JPG, PNG, WEBP, BMP, TIFF · до 20 МБ</span>
+      </label>
+      <div class="upload-actions">
+        <p id="run-status" role="status" aria-live="polite">Подключение…</p>
+        <button id="analyze-button" type="submit" disabled>Распознать частицы</button>
+      </div>
+    </form>
+
+    <p id="error-message" class="error-message" role="alert" hidden></p>
+
+    <section id="viewer" class="viewer" aria-labelledby="viewer-title" hidden>
+      <div class="viewer-heading">
+        <h2 id="viewer-title">Изображение</h2>
+        <div id="view-tabs" class="view-tabs" role="group" aria-label="Режим просмотра" hidden>
+          <button id="view-original" type="button" aria-pressed="false">Оригинал</button>
+          <button id="view-result" type="button" aria-pressed="true">Результат</button>
+        </div>
+      </div>
+      <div id="zoom-controls" class="zoom-controls" role="group" aria-label="Масштаб изображения" hidden>
+        <span id="zoom-help">Колесо мыши — масштаб, перетаскивание — перемещение</span>
+        <div class="zoom-buttons">
+          <button id="zoom-out" type="button" aria-label="Уменьшить изображение" title="Уменьшить">−</button>
+          <output id="zoom-value" aria-label="Масштаб">100%</output>
+          <button id="zoom-in" type="button" aria-label="Увеличить изображение" title="Увеличить">+</button>
+          <button id="zoom-reset" type="button" title="Показать изображение целиком">Сбросить</button>
+        </div>
+      </div>
+      <div id="image-stage" class="image-stage" tabindex="0" role="region" aria-label="Просмотр изображения" aria-describedby="zoom-help">
+        <p id="preview-placeholder" class="preview-placeholder">Загрузка предпросмотра…</p>
+        <img id="preview-image" alt="Исходное изображение порошка" draggable="false" hidden>
+        <span id="particle-tooltip" class="particle-tooltip" role="tooltip" hidden></span>
+        <div id="processing-overlay" class="processing-overlay" hidden>
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Распознавание…</span>
+        </div>
+      </div>
+      <div id="result-summary" class="result-summary" hidden>
+        <div class="result-metrics">
+          <p id="particle-count"></p>
+          <p id="confidence-summary" class="confidence-summary" title="Среднее значение confidence найденных частиц. Точность по эталонной разметке не оценивается."></p>
+        </div>
+        <a id="download-image" download="particles.jpg">Скачать результат</a>
+      </div>
+      <p id="limit-message" class="limit-message" hidden></p>
+    </section>
+  </main>
+</body>
+</html>

@@ -226,3 +226,6 @@ __marimo__/
 /data_real
 *.pt
 /models
+
+# Local verification artifacts
+/.tmp/
