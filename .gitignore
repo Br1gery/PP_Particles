@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+*.png
+/docs
+/data
+/data_real
+*.pt
+/models
