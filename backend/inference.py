@@ -8,6 +8,7 @@ from time import perf_counter
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
 from backend.config import Settings
+from backend.classifier import CoverageClassifier, COATING_COLORS
 from backend.schemas import Detection, ImageInfo, Prediction, Statistics
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ def annotate(image: Image.Image, detections: list[Detection]) -> Image.Image:
     draw = ImageDraw.Draw(annotated)
     line_width = max(2, round(min(image.size) / 500))
     for detection in detections:
-        draw.rectangle(detection.bbox, outline="#16e0ad", width=line_width)
+        draw.rectangle(detection.bbox, outline=COATING_COLORS[detection.coating_status], width=line_width)
     return annotated
 
 
@@ -67,6 +68,7 @@ class Detector:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.model = None
+        self.classifier = CoverageClassifier(settings)
         self.device = settings.device
         self.classes: dict[int, str] = {}
         self.error: str | None = None
@@ -82,18 +84,19 @@ class Detector:
             self.device = ("cuda:0" if torch.cuda.is_available() else "cpu") if self.settings.device == "auto" else self.settings.device
             model = YOLO(str(self.settings.model_path), task="detect")
             model.to(self.device)
+            self.classifier.load(self.device)
             self.classes = dict(model.names)
             self.model = model
             self.error = None
             logger.info("Loaded %s on %s", self.settings.model_path.name, self.device)
         except Exception:
-            logger.exception("Could not load detection model")
+            logger.exception("Could not load detection/classification pipeline")
             self.model = None
-            self.error = "Модель не загружена. Проверьте файл весов, зависимости и MODEL_DEVICE; подробности в журнале сервера."
+            self.error = "Не удалось загрузить модели. Проверьте best_yolo26.pt, bestClassifier.pt и настройки; подробности в журнале сервера."
 
     @property
     def ready(self) -> bool:
-        return self.model is not None
+        return self.model is not None and self.classifier.ready
 
     def predict(self, data: bytes, filename: str) -> Prediction:
         if not self.ready:
@@ -113,22 +116,37 @@ class Detector:
                 save=False,
                 verbose=False,
             )[0]
-            inference_ms = (perf_counter() - inference_started) * 1000
-            detections = []
             # Transfer all detections to CPU once, instead of synchronizing per box.
             rows = result.boxes.data.cpu().tolist() if result.boxes is not None else []
-            for index, row in enumerate(sorted(rows, key=lambda row: row[4], reverse=True), 1):
+            detector_inference_ms = (perf_counter() - inference_started) * 1000
+            particles = []
+            for row in sorted(rows, key=lambda row: row[4], reverse=True):
                 x1, y1, x2, y2, score, class_id = row[:6]
                 x1, x2 = (max(0.0, min(float(x), image.width)) for x in (x1, x2))
                 y1, y2 = (max(0.0, min(float(y), image.height)) for y in (y1, y2))
-                detections.append(Detection(
-                    id=index, class_id=int(class_id), class_name=self.classes.get(int(class_id), str(int(class_id))),
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                particles.append(dict(
+                    id=len(particles) + 1, class_id=int(class_id), class_name=self.classes.get(int(class_id), str(int(class_id))),
                     confidence=round(score, 6), bbox=(round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)),
                     width_px=round(x2 - x1, 2), height_px=round(y2 - y1, 2),
                 ))
+            classification_started = perf_counter()
+            classifications = self.classifier.classify(image, [p["bbox"] for p in particles])
+            classifier_inference_ms = (perf_counter() - classification_started) * 1000
+            if len(classifications) != len(particles):
+                raise RuntimeError("Classifier output does not match the detected particles")
+            detections = [Detection(**particle, **classification.model_dump())
+                          for particle, classification in zip(particles, classifications)]
             count = len(detections)
+            coated_count = sum(d.coating_status == "coated" for d in detections)
+            uncoated_count = sum(d.coating_status == "uncoated" for d in detections)
             statistics = Statistics(
                 count=count,
+                coated_count=coated_count, uncoated_count=uncoated_count,
+                uncertain_count=count - coated_count - uncoated_count,
+                coverage_percent=round(coated_count / count * 100, 2) if count else None,
+                mean_classifier_confidence=sum(d.classifier_confidence for d in detections) / count if count else None,
                 mean_confidence=round(sum(d.confidence for d in detections) / count, 6) if count else None,
                 mean_width_px=round(sum(d.width_px for d in detections) / count, 2) if count else None,
                 mean_height_px=round(sum(d.height_px for d in detections) / count, 2) if count else None,
@@ -138,9 +156,15 @@ class Detector:
             annotated = image_data_url(annotate(image, detections))
             return Prediction(
                 model=self.settings.model_path.name, device=self.device,
+                classifier=self.settings.classifier_path.name,
+                classifier_confidence_threshold=self.settings.classifier_confidence_threshold,
+                classifier_normalization=self.settings.classifier_normalization,
                 confidence_threshold=self.settings.confidence_threshold,
                 image_size=self.settings.default_image_size, max_detections=self.settings.max_detections,
-                inference_ms=round(inference_ms, 2), total_ms=round((perf_counter() - started) * 1000, 2),
+                inference_ms=round(detector_inference_ms + classifier_inference_ms, 2),
+                detector_inference_ms=round(detector_inference_ms, 2),
+                classifier_inference_ms=round(classifier_inference_ms, 2),
+                total_ms=round((perf_counter() - started) * 1000, 2),
                 image=ImageInfo(filename=filename, width=image.width, height=image.height),
                 statistics=statistics, detections=detections,
                 original_image=original, annotated_image=annotated,

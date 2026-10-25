@@ -1,3 +1,5 @@
+import { drawFrames } from "./particle-review.mjs";
+
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
 const ZOOM_STEP = 1.25;
@@ -50,8 +52,8 @@ export function detectionAt(point, detections, view, displayedSize, originalSize
 }
 
 export class ImageViewer {
-  constructor({ stage, image, controls, zoomIn, zoomOut, reset, value, tooltip }) {
-    Object.assign(this, { stage, image, controls, zoomIn, zoomOut, resetButton: reset, value, tooltip });
+  constructor({ stage, image, controls, zoomIn, zoomOut, reset, value, tooltip, overlay, onSelect }) {
+    Object.assign(this, { stage, image, controls, zoomIn, zoomOut, resetButton: reset, value, tooltip, overlay, onSelect });
     this.view = { scale: 1, x: 0, y: 0 };
     this.baseSize = { width: 0, height: 0 };
     this.loaded = false;
@@ -82,16 +84,16 @@ export class ImageViewer {
     }, { passive: false });
     stage.addEventListener("dblclick", (event) => {
       if (!this.canInteract()) return;
+      if (this.particleAt(this.point(event))) return;
       event.preventDefault();
       this.zoom(this.view.scale > 1 ? 1 : 2, this.point(event));
     });
     stage.addEventListener("pointerdown", (event) => {
-      if (!this.canInteract() || this.view.scale <= 1 || event.button !== 0 || this.drag) return;
-      event.preventDefault();
+      if (!this.canInteract() || event.button !== 0 || !event.isPrimary || this.drag) return;
+      if (this.view.scale > 1) event.preventDefault();
       this.hideTooltip();
-      this.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, start: { ...this.view } };
+      this.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, start: { ...this.view }, moved: false };
       stage.setPointerCapture(event.pointerId);
-      stage.classList.add("panning");
     });
     stage.addEventListener("pointermove", (event) => {
       if (!this.drag) {
@@ -102,12 +104,24 @@ export class ImageViewer {
         return;
       }
       if (this.drag.id !== event.pointerId) return;
+      if (Math.hypot(event.clientX - this.drag.x, event.clientY - this.drag.y) > 5) this.drag.moved = true;
+      if (!this.drag.moved || this.view.scale <= 1) return;
+      stage.classList.add("panning");
       this.view.x = this.drag.start.x + event.clientX - this.drag.x;
       this.view.y = this.drag.start.y + event.clientY - this.drag.y;
       this.render();
     });
     stage.addEventListener("pointerleave", () => this.hideTooltip());
-    for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    stage.addEventListener("pointerup", (event) => {
+      if (this.drag?.id !== event.pointerId) return;
+      const clicked = !this.drag.moved && Math.hypot(event.clientX - this.drag.x, event.clientY - this.drag.y) <= 5;
+      this.stopDrag();
+      if (clicked && this.canInteract()) {
+        const particle = this.particleAt(this.point(event));
+        if (particle) this.onSelect?.(particle.id);
+      }
+    });
+    for (const name of ["pointercancel", "lostpointercapture"]) {
       stage.addEventListener(name, (event) => {
         if (this.drag?.id === event.pointerId) this.stopDrag();
       });
@@ -186,21 +200,47 @@ export class ImageViewer {
   setDetections(detections) {
     this.detections = detections;
     this.hideTooltip();
+    this.renderAnnotations();
+  }
+
+  particleAt(point) {
+    return detectionAt(point, this.detections, this.view, this.baseSize,
+      { width: this.imageWidth, height: this.imageHeight });
+  }
+
+  renderAnnotations() {
+    const viewport = this.viewport();
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(viewport.width * ratio));
+    const height = Math.max(1, Math.round(viewport.height * ratio));
+    if (this.overlay.width !== width) this.overlay.width = width;
+    if (this.overlay.height !== height) this.overlay.height = height;
+    const context = this.overlay.getContext("2d");
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, viewport.width, viewport.height);
+    if (!this.loaded || !this.imageWidth || !this.imageHeight) return;
+    drawFrames(context, this.detections, {
+      x: this.view.x, y: this.view.y,
+      scaleX: this.baseSize.width * this.view.scale / this.imageWidth,
+      scaleY: this.baseSize.height * this.view.scale / this.imageHeight,
+    });
   }
 
   hideTooltip() {
     this.hoverPoint = null;
     this.tooltip.hidden = true;
+    this.stage.classList.remove("particle-hover");
   }
 
   updateTooltip() {
     const match = this.canInteract() && !this.drag && this.hoverPoint
-      ? detectionAt(this.hoverPoint, this.detections, this.view, this.baseSize,
-        { width: this.imageWidth, height: this.imageHeight })
+      ? this.particleAt(this.hoverPoint)
       : null;
     this.tooltip.hidden = !match;
+    this.stage.classList.toggle("particle-hover", Boolean(match));
     if (!match) return;
     this.tooltip.textContent = `№ ${match.id}`;
+    this.tooltip.dataset.coatingStatus = match.coating_status;
     const viewport = this.viewport();
     const left = clamp(this.hoverPoint.x + 12, 4, Math.max(4, viewport.width - this.tooltip.offsetWidth - 4));
     const top = clamp(this.hoverPoint.y + 12, 4, Math.max(4, viewport.height - this.tooltip.offsetHeight - 4));
@@ -221,6 +261,7 @@ export class ImageViewer {
     this.view.y = constrainOffset(this.view.y, this.baseSize.height * this.view.scale, viewport.height);
     this.image.style.transform = `translate(${this.view.x}px, ${this.view.y}px) scale(${this.view.scale})`;
     this.stage.classList.toggle("zoomed", this.loaded && this.view.scale > 1);
+    this.renderAnnotations();
     this.updateControls();
     this.updateTooltip();
   }

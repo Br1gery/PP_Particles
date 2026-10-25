@@ -1,7 +1,17 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
-class Detection(BaseModel):
+class Classification(BaseModel):
+    coating_class: Literal["coated", "insufficient_coating"]
+    p_coated: float
+    p_insufficient: float
+    classifier_confidence: float
+    coating_status: Literal["coated", "uncoated", "uncertain"]
+
+
+class Detection(Classification):
     id: int
     class_id: int
     class_name: str
@@ -19,6 +29,11 @@ class ImageInfo(BaseModel):
 
 class Statistics(BaseModel):
     count: int
+    coated_count: int
+    uncoated_count: int
+    uncertain_count: int
+    coverage_percent: float | None
+    mean_classifier_confidence: float | None
     mean_confidence: float | None
     mean_width_px: float | None
     mean_height_px: float | None
@@ -27,11 +42,16 @@ class Statistics(BaseModel):
 
 class Prediction(BaseModel):
     model: str
+    classifier: str
+    classifier_confidence_threshold: float
+    classifier_normalization: str
     device: str
     confidence_threshold: float
     image_size: int
     max_detections: int
     inference_ms: float
+    detector_inference_ms: float
+    classifier_inference_ms: float
     total_ms: float
     image: ImageInfo
     statistics: Statistics
@@ -43,6 +63,10 @@ class Prediction(BaseModel):
 class Health(BaseModel):
     status: str
     model: str
+    classifier: str
+    classifier_ready: bool
+    classifier_confidence_threshold: float
+    classifier_normalization: str
     device: str
     classes: dict[int, str]
     error: str | None

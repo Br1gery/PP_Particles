@@ -12,7 +12,7 @@
   <main class="page">
     <header class="page-header">
       <h1>Распознавание частиц</h1>
-      <p>Загрузите изображение порошка, чтобы найти и выделить частицы.</p>
+      <p>Загрузите изображение порошка, чтобы найти частицы и оценить их покрытие.</p>
     </header>
 
     <form id="analysis-form" class="upload-card">
@@ -38,8 +38,25 @@
           <button id="view-result" type="button" aria-pressed="true">Результат</button>
         </div>
       </div>
+      <div id="coverage-summary" class="coverage-summary" aria-label="Классификация покрытия" hidden>
+        <div class="coverage-stat coated-stat"><span><i class="category-dot" aria-hidden="true"></i>Покрытые</span><strong id="coated-count">—</strong></div>
+        <div class="coverage-stat uncoated-stat" title="Класс insufficient_coating: недостаточное или отсутствующее покрытие"><span><i class="category-dot" aria-hidden="true"></i>Непокрытые</span><strong id="uncoated-count">—</strong><small>Включая недостаточное покрытие</small></div>
+        <div class="coverage-stat uncertain-stat"><span><i class="category-dot" aria-hidden="true"></i>Спорные</span><strong id="uncertain-count">—</strong><small id="uncertain-description">Низкая уверенность классификатора</small></div>
+        <div class="coverage-stat"><span>Покрытие</span><strong id="coverage-percent">—</strong><small>Доля покрытых среди всех найденных частиц, с учётом ручной оценки</small></div>
+      </div>
+      <div id="particle-filters" class="particle-filters" hidden>
+        <div class="filter-options" role="group" aria-label="Показать группы частиц">
+          <label class="filter-chip coated-filter"><input id="filter-coated" type="checkbox" checked>Покрытые</label>
+          <label class="filter-chip uncertain-filter"><input id="filter-uncertain" type="checkbox" checked>Спорные</label>
+          <label class="filter-chip uncoated-filter"><input id="filter-uncoated" type="checkbox" checked>Непокрытые</label>
+        </div>
+        <div class="particle-picker-row">
+          <span id="visible-count" role="status" aria-live="polite"></span>
+          <select id="particle-picker" aria-label="Открыть частицу"><option value="">Открыть частицу…</option></select>
+        </div>
+      </div>
       <div id="zoom-controls" class="zoom-controls" role="group" aria-label="Масштаб изображения" hidden>
-        <span id="zoom-help">Колесо мыши — масштаб, перетаскивание — перемещение</span>
+        <span id="zoom-help">Колесо — масштаб, перетаскивание — перемещение, клик — частица</span>
         <div class="zoom-buttons">
           <button id="zoom-out" type="button" aria-label="Уменьшить изображение" title="Уменьшить">−</button>
           <output id="zoom-value" aria-label="Масштаб">100%</output>
@@ -50,6 +67,7 @@
       <div id="image-stage" class="image-stage" tabindex="0" role="region" aria-label="Просмотр изображения" aria-describedby="zoom-help">
         <p id="preview-placeholder" class="preview-placeholder">Загрузка предпросмотра…</p>
         <img id="preview-image" alt="Исходное изображение порошка" draggable="false" hidden>
+        <canvas id="annotation-layer" class="annotation-layer" aria-hidden="true"></canvas>
         <span id="particle-tooltip" class="particle-tooltip" role="tooltip" hidden></span>
         <div id="processing-overlay" class="processing-overlay" hidden>
           <span class="spinner" aria-hidden="true"></span>
@@ -59,12 +77,37 @@
       <div id="result-summary" class="result-summary" hidden>
         <div class="result-metrics">
           <p id="particle-count"></p>
-          <p id="confidence-summary" class="confidence-summary" title="Среднее значение confidence найденных частиц. Точность по эталонной разметке не оценивается."></p>
+          <p id="confidence-summary" class="confidence-summary" title="Средняя уверенность классификатора покрытия. Точность по эталонной разметке не оценивается."></p>
         </div>
         <a id="download-image" download="particles.jpg">Скачать результат</a>
       </div>
+      <p id="manual-review-note" class="manual-review-note" hidden></p>
       <p id="limit-message" class="limit-message" hidden></p>
     </section>
   </main>
+  <dialog id="particle-dialog" class="particle-dialog" aria-labelledby="particle-title">
+    <div class="particle-dialog-heading">
+      <h2 id="particle-title">Частица</h2>
+      <button id="close-particle" type="button" class="close-particle" aria-label="Закрыть просмотр частицы">×</button>
+    </div>
+    <div class="particle-detail-stage"><canvas id="particle-crop" role="img" aria-label="Крупный план выбранной частицы"></canvas></div>
+    <div class="particle-detail-info">
+      <strong id="particle-status" class="particle-status"></strong>
+      <p id="particle-model-info"></p>
+      <p id="particle-dimensions"></p>
+    </div>
+    <div id="manual-review-actions" class="manual-review-actions" hidden>
+      <p>Определите покрытие спорной частицы:</p>
+      <div class="manual-review-buttons">
+        <button id="mark-coated" type="button" aria-pressed="false">Покрыта</button>
+        <button id="mark-uncoated" type="button" aria-pressed="false">Непокрыта</button>
+        <button id="reset-review" type="button" hidden>Отменить ручной выбор</button>
+      </div>
+    </div>
+    <div class="particle-navigation">
+      <button id="previous-particle" type="button">← Предыдущая</button>
+      <button id="next-particle" type="button">Следующая →</button>
+    </div>
+  </dialog>
 </body>
 </html>

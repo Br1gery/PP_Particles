@@ -2,6 +2,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/image-viewer.test.mjs"
+    "test": "node --test tests/image-viewer.test.mjs tests/particle-review.test.mjs"
   }
 }

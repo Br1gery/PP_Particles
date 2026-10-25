@@ -26,7 +26,7 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
 
     app = FastAPI(
         title="PowderScope API", version="1.0.0",
-        description="Распознавание порошковых частиц моделью best_yolo26. Координаты рамок — в пикселях исходного изображения после коррекции EXIF.",
+        description="YOLO26s находит частицы, ResNet18 определяет покрытие. Координаты рамок — в пикселях исходного изображения после коррекции EXIF.",
         lifespan=lifespan,
     )
 
@@ -35,6 +35,9 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
         payload = Health(
             status="ready" if detector.ready else "unavailable",
             model=settings.model_path.name, device=detector.device, classes=detector.classes,
+            classifier=settings.classifier_path.name, classifier_ready=detector.classifier.ready,
+            classifier_confidence_threshold=settings.classifier_confidence_threshold,
+            classifier_normalization=settings.classifier_normalization,
             error=detector.error, max_upload_bytes=settings.max_upload_bytes,
             max_image_pixels=settings.max_image_pixels, max_detections=settings.max_detections,
             default_image_size=settings.default_image_size,
