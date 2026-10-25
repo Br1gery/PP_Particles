@@ -197,7 +197,7 @@ async function renderResult(result) {
     ? "Уверенность классификации: —"
     : `Уверенность классификации: ${percent.format(result.statistics.mean_classifier_confidence)}`;
   $("limit-message").hidden = !result.statistics.detection_limit_reached;
-  $("limit-message").textContent = `Достигнут лимит ${number.format(result.max_detections)} обнаружений. На изображении могут быть другие частицы.`;
+  $("limit-message").textContent = `Детектор достиг лимита ${number.format(result.max_detections)} рамок до удаления дубликатов. На изображении могут быть другие частицы.`;
   $("download-image").href = "#";
   $("download-image").title = "Скачать видимые рамки с учётом фильтров и ручных решений";
   renderReview();

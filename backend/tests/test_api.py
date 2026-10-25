@@ -37,10 +37,12 @@ class MemoryDetector(Detector):
         super().__init__(settings)
         self.rows = [[10, 12, 40, 52, .9, 0], [50, 10, 70, 30, .6, 0]]
         self.arguments = None
+        self.classified_boxes = []
         self.probabilities = [(.9, .1), (.1, .9)]
         self.classifier = SimpleNamespace(ready=True, classify=self.classify_crops)
 
     def classify_crops(self, image, boxes):
+        self.classified_boxes = boxes
         return [classify_probabilities(*self.probabilities[i], self.settings.classifier_confidence_threshold)
                 for i in range(len(boxes))]
 
@@ -113,6 +115,39 @@ class ApiTests(unittest.TestCase):
         self.assertIsNone(response.json()["statistics"]["coverage_percent"])
         self.assertIsNone(response.json()["statistics"]["mean_classifier_confidence"])
         self.assertEqual(response.json()["statistics"]["uncertain_count"], 0)
+
+    def test_duplicate_boxes_are_removed_before_classification_and_statistics(self):
+        self.detector.rows = [
+            [10, 12, 40, 52, .45, 0],
+            [50, 10, 70, 30, .6, 0],
+            [11, 13, 41, 53, .94, 0],
+        ]
+        response = self.post()
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual([d["id"] for d in result["detections"]], [1, 2])
+        self.assertEqual(result["detections"][0]["bbox"], [11, 13, 41, 53])
+        self.assertEqual(result["detections"][0]["confidence"], .94)
+        self.assertEqual(self.detector.classified_boxes, [(11, 13, 41, 53), (50, 10, 70, 30)])
+        self.assertEqual(result["statistics"]["count"], 2)
+        self.assertEqual(result["statistics"]["mean_confidence"], .77)
+        self.assertEqual(result["statistics"]["coated_count"], 1)
+        self.assertEqual(result["statistics"]["uncoated_count"], 1)
+        self.assertEqual(result["statistics"]["coverage_percent"], 50)
+
+    def test_nms_clips_boxes_first_and_preserves_candidate_limit_warning(self):
+        self.detector.rows = [
+            [-10, -10, 40, 40, .8, 0],
+            [0, 0, 40, 40, .7, 0],
+            [110, 20, 140, 45, .6, 0],
+        ]
+        self.detector.settings = replace(self.settings, max_detections=3)
+        response = self.post()
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(self.detector.classified_boxes, [(0, 0, 40, 40), (110, 20, 120, 45)])
+        self.assertEqual(result["statistics"]["count"], 2)
+        self.assertTrue(result["statistics"]["detection_limit_reached"])
 
     def test_uncertain_particles_are_separate_from_covered_and_uncovered(self):
         self.detector.rows.append([75, 10, 95, 30, .8, 0])

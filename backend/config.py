@@ -27,6 +27,7 @@ class Settings:
     max_detections: int = 1000
     default_image_size: int = 1024
     confidence_threshold: float = 0.25
+    duplicate_iou_threshold: float = 0.70
     classifier_confidence_threshold: float = 0.70
     classifier_batch_size: int = 16
     classifier_image_size: int = 320

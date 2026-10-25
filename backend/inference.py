@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
 from backend.config import Settings
 from backend.classifier import CoverageClassifier, COATING_COLORS
+from backend.postprocessing import suppress_duplicate_boxes
 from backend.schemas import Detection, ImageInfo, Prediction, Statistics
 
 logger = logging.getLogger(__name__)
@@ -118,16 +119,22 @@ class Detector:
             )[0]
             # Transfer all detections to CPU once, instead of synchronizing per box.
             rows = result.boxes.data.cpu().tolist() if result.boxes is not None else []
-            detector_inference_ms = (perf_counter() - inference_started) * 1000
-            particles = []
-            for row in sorted(rows, key=lambda row: row[4], reverse=True):
+            # Keep the model's candidate-limit warning even if NMS removes some rows.
+            detection_limit_reached = len(rows) >= self.settings.max_detections
+            candidates = []
+            for row in rows:
                 x1, y1, x2, y2, score, class_id = row[:6]
                 x1, x2 = (max(0.0, min(float(x), image.width)) for x in (x1, x2))
                 y1, y2 = (max(0.0, min(float(y), image.height)) for y in (y1, y2))
                 if x2 <= x1 or y2 <= y1:
                     continue
+                candidates.append([x1, y1, x2, y2, score, class_id])
+            rows = suppress_duplicate_boxes(candidates, self.settings.duplicate_iou_threshold)
+            detector_inference_ms = (perf_counter() - inference_started) * 1000
+            particles = []
+            for index, (x1, y1, x2, y2, score, class_id) in enumerate(rows, 1):
                 particles.append(dict(
-                    id=len(particles) + 1, class_id=int(class_id), class_name=self.classes.get(int(class_id), str(int(class_id))),
+                    id=index, class_id=int(class_id), class_name=self.classes.get(int(class_id), str(int(class_id))),
                     confidence=round(score, 6), bbox=(round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)),
                     width_px=round(x2 - x1, 2), height_px=round(y2 - y1, 2),
                 ))
@@ -150,7 +157,7 @@ class Detector:
                 mean_confidence=round(sum(d.confidence for d in detections) / count, 6) if count else None,
                 mean_width_px=round(sum(d.width_px for d in detections) / count, 2) if count else None,
                 mean_height_px=round(sum(d.height_px for d in detections) / count, 2) if count else None,
-                detection_limit_reached=count >= self.settings.max_detections,
+                detection_limit_reached=detection_limit_reached,
             )
             original = image_data_url(image)
             annotated = image_data_url(annotate(image, detections))
