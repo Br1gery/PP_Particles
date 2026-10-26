@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reviewedDetections, setManualReview, visibleDetections, summarizeCoverage, cropBounds, drawFrames, COATING_COLORS } from "../particle-review.mjs";
+import { reviewedDetections, setManualReview, createManualParticle, visibleDetections, summarizeCoverage, cropBounds, drawFrames, COATING_COLORS } from "../particle-review.mjs";
 
 const particles = [
   { id: 1, coating_status: "coated", classifier_confidence: .9, bbox: [10, 10, 30, 30] },
@@ -63,4 +63,40 @@ test("drawing uses only selected particles and the current review color", () => 
   assert.equal(records.length, 2);
   assert.equal(records[0].color, COATING_COLORS.uncoated);
   assert.deepEqual(records[0].bbox, [60, 15, 40, 40]);
+});
+
+test("manual boxes normalize drag direction, clip to image, and never invent confidence", () => {
+  const particle = createManualParticle(4, [125, 90, 20, 10], 100, 80);
+  assert.deepEqual(particle.bbox, [20, 10, 100, 80]);
+  assert.equal(particle.width_px, 80);
+  assert.equal(particle.height_px, 70);
+  assert.equal(particle.source, "manual");
+  assert.equal(particle.confidence, null);
+  assert.equal(particle.classifier_confidence, null);
+  assert.throws(() => createManualParticle(5, [0, 0, 1, 20], 100, 80));
+});
+
+test("new manual particles can take any class and contribute to coverage", () => {
+  const addition = createManualParticle(4, [10, 40, 30, 60], 100, 80);
+  let overrides = setManualReview([...particles, addition], new Map(), 4, "coated");
+  let current = reviewedDetections(particles, overrides, [addition]);
+  assert.equal(summarizeCoverage(current).coated_count, 2);
+  assert.equal(summarizeCoverage(current).coverage_percent, 50);
+  overrides = setManualReview([...particles, addition], overrides, 4, "uncertain");
+  current = reviewedDetections(particles, overrides, [addition]);
+  assert.equal(summarizeCoverage(current).uncertain_count, 2);
+  assert.equal(current.find((p) => p.id === 4).model_coating_status, null);
+});
+
+test("deleting any model or manual box updates counts and undo restores its decision", () => {
+  const addition = createManualParticle(4, [10, 40, 30, 60], 100, 80);
+  const overrides = setManualReview([...particles, addition], new Map(), 4, "coated");
+  const deleted = new Set([1, 4]);
+  let current = reviewedDetections(particles, overrides, [addition], deleted);
+  assert.deepEqual(current.map((p) => p.id), [2, 3]);
+  assert.equal(summarizeCoverage(current).coverage_percent, 0);
+  deleted.delete(4);
+  current = reviewedDetections(particles, overrides, [addition], deleted);
+  assert.equal(current.find((p) => p.id === 4).coating_status, "coated");
+  assert.equal(summarizeCoverage(current).count, 3);
 });

@@ -45,6 +45,11 @@
         <div class="coverage-stat"><span>Покрытие</span><strong id="coverage-percent">—</strong><small>Доля покрытых среди всех найденных частиц, с учётом ручной оценки</small></div>
       </div>
       <div id="particle-filters" class="particle-filters" hidden>
+        <div class="annotation-actions">
+          <button id="draw-particle" type="button" aria-pressed="false">Выделить частицу</button>
+          <button id="undo-delete" type="button" hidden>Отменить удаление</button>
+          <span id="draw-help" role="status" hidden>Обведите частицу перетаскиванием. Escape — отмена.</span>
+        </div>
         <div class="filter-options" role="group" aria-label="Показать группы частиц">
           <label class="filter-chip coated-filter"><input id="filter-coated" type="checkbox" checked>Покрытые</label>
           <label class="filter-chip uncertain-filter"><input id="filter-uncertain" type="checkbox" checked>Спорные</label>
@@ -79,7 +84,7 @@
           <p id="particle-count"></p>
           <p id="confidence-summary" class="confidence-summary" title="Средняя уверенность классификатора покрытия. Точность по эталонной разметке не оценивается."></p>
         </div>
-        <a id="download-image" download="particles.jpg">Скачать результат</a>
+        <div class="result-actions"><a id="download-image" download="particles.jpg">Скачать изображение</a><button id="generate-report" type="button">Сформировать отчёт</button></div>
       </div>
       <p id="manual-review-note" class="manual-review-note" hidden></p>
       <p id="limit-message" class="limit-message" hidden></p>
@@ -101,9 +106,11 @@
       <div class="manual-review-buttons">
         <button id="mark-coated" type="button" aria-pressed="false">Покрыта</button>
         <button id="mark-uncoated" type="button" aria-pressed="false">Непокрыта</button>
+        <button id="mark-uncertain" type="button" aria-pressed="false" hidden>Спорная</button>
         <button id="reset-review" type="button" hidden>Отменить ручной выбор</button>
       </div>
     </div>
+    <button id="delete-particle" class="delete-particle" type="button">Удалить выделение</button>
     <div class="particle-navigation">
       <button id="previous-particle" type="button">← Предыдущая</button>
       <button id="next-particle" type="button">Следующая →</button>

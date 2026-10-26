@@ -4,13 +4,14 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from backend.config import ROOT, Settings
 from backend.inference import Detector, InvalidImage, ModelBusy, ModelUnavailable
 from backend.schemas import Health, Prediction
+from backend.report_schemas import ReportRequest
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,20 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
             raise HTTPException(500, "Не удалось распознать изображение. Попробуйте снова; подробности в журнале сервера.") from exc
         finally:
             file.file.close()
+
+    @app.post("/api/report", tags=["Report"], response_class=Response,
+              responses={200: {"content": {"application/pdf": {}}}, 400: {"description": "Некорректные данные отчёта"}})
+    def report(payload: ReportRequest):
+        from backend.reporting import build_report
+
+        try:
+            pdf = build_report(payload, settings)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            logger.exception("PDF report failed")
+            raise HTTPException(500, "Не удалось сформировать PDF-отчёт. Подробности в журнале сервера.") from exc
+        return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="powderscope-report.pdf"'})
 
     # Mount last, so API endpoints and documentation take precedence over static files.
     app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")

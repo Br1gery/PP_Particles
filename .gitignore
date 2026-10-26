@@ -229,3 +229,5 @@ __marimo__/
 
 # Local verification artifacts
 /.tmp/
+/tmp/
+/output/

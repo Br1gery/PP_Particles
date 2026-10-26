@@ -1,14 +1,15 @@
 "use strict";
 
 import { ImageViewer } from "./image-viewer.mjs";
-import { COATING_LABELS, reviewedDetections, setManualReview, visibleDetections, summarizeCoverage, cropBounds, drawFrames } from "./particle-review.mjs";
+import { COATING_LABELS, reviewedDetections, setManualReview, createManualParticle, visibleDetections, summarizeCoverage, cropBounds, drawFrames } from "./particle-review.mjs";
 
 const $ = (id) => document.getElementById(id);
 const statuses = ["coated", "uncertain", "uncoated"];
 const state = {
   file: null, previewUrl: null, result: null, originalImage: null,
-  ready: false, busy: false, exporting: false, connectionMessage: "Подключение…",
+  ready: false, busy: false, exporting: false, reportBusy: false, connectionMessage: "Подключение…",
   view: "original", overrides: new Map(), filters: new Set(statuses), detections: [], selectedId: null,
+  additions: [], deletedIds: new Set(), deletedHistory: [],
 };
 const supported = /\.(jpe?g|png|webp|bmp|tiff?)$/i;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
@@ -18,6 +19,7 @@ const imageViewer = new ImageViewer({
   stage: $("image-stage"), image: $("preview-image"), controls: $("zoom-controls"),
   zoomIn: $("zoom-in"), zoomOut: $("zoom-out"), reset: $("zoom-reset"), value: $("zoom-value"),
   tooltip: $("particle-tooltip"), overlay: $("annotation-layer"), onSelect: openParticle,
+  onDraw: addParticle, onDrawCancel: () => setDrawing(false),
 });
 
 function showError(message = "") {
@@ -32,6 +34,10 @@ function updateControls() {
   $("file-input").disabled = state.busy;
   for (const status of statuses) $(`filter-${status}`).disabled = state.busy;
   $("particle-picker").disabled = state.busy || !getVisibleDetections().length;
+  $("draw-particle").disabled = state.busy || !state.result;
+  $("undo-delete").disabled = state.busy;
+  $("generate-report").disabled = state.busy || state.reportBusy || !state.result;
+  $("generate-report").textContent = state.reportBusy ? "Формирование PDF…" : "Сформировать отчёт";
   $("run-status").textContent = state.busy ? "Подождите, изображение обрабатывается."
     : !state.ready ? state.connectionMessage
     : state.result ? "Готово. Кликните по частице для подробного просмотра."
@@ -56,6 +62,27 @@ async function checkHealth() {
 }
 
 function getVisibleDetections() { return visibleDetections(state.detections, state.filters); }
+function allSources() { return [...(state.result?.detections || []), ...state.additions]; }
+
+function setDrawing(enabled) {
+  imageViewer.setDrawing(enabled);
+  $("draw-particle").setAttribute("aria-pressed", String(enabled));
+  $("draw-particle").textContent = enabled ? "Отменить выделение" : "Выделить частицу";
+  $("draw-help").hidden = !enabled;
+}
+
+function addParticle(bbox) {
+  if (state.busy || !state.result) return;
+  try {
+    if (state.detections.length >= 5000 || state.additions.length >= 5000) throw new Error("Достигнут лимит 5000 выделений.");
+    const id = Math.max(0, ...allSources().map((particle) => particle.id)) + 1;
+    const particle = createManualParticle(id, bbox, state.originalImage.naturalWidth, state.originalImage.naturalHeight);
+    state.additions.push(particle);
+    setDrawing(false);
+    renderReview();
+    openParticle(id);
+  } catch (error) { showError(error.message); }
+}
 
 function updateVisibleParticles() {
   const visible = getVisibleDetections();
@@ -70,6 +97,7 @@ function updateVisibleParticles() {
 }
 
 function setView(view) {
+  if (view !== "result") setDrawing(false);
   state.view = view;
   const isResult = view === "result" && Boolean(state.result);
   $("view-result").setAttribute("aria-pressed", String(isResult));
@@ -85,10 +113,15 @@ function resetReview() {
   if ($("particle-dialog").open) $("particle-dialog").close();
   state.selectedId = null;
   state.overrides = new Map();
+  state.additions = [];
+  state.deletedIds = new Set();
+  state.deletedHistory = [];
+  setDrawing(false);
   state.filters = new Set(statuses);
   state.detections = [];
   for (const status of statuses) $(`filter-${status}`).checked = true;
   $("manual-review-note").hidden = true;
+  $("undo-delete").hidden = true;
 }
 
 function selectFile(file) {
@@ -168,15 +201,18 @@ $("particle-picker").addEventListener("change", (event) => {
 });
 
 function renderReview() {
-  state.detections = reviewedDetections(state.result.detections, state.overrides);
+  state.detections = reviewedDetections(state.result.detections, state.overrides, state.additions, state.deletedIds);
   const summary = summarizeCoverage(state.detections);
   $("coated-count").textContent = number.format(summary.coated_count);
   $("uncoated-count").textContent = number.format(summary.uncoated_count);
   $("uncertain-count").textContent = number.format(summary.uncertain_count);
   $("coverage-percent").textContent = summary.coverage_percent === null ? "—" : percent.format(summary.coverage_percent / 100);
-  $("particle-count").textContent = summary.count ? `Найдено частиц: ${number.format(summary.count)}` : "Частицы не обнаружены.";
-  $("manual-review-note").hidden = !summary.manual_count;
-  $("manual-review-note").textContent = `Ручных решений: ${summary.manual_count}. Учтены в сводке и скачиваемом изображении; действуют до обновления страницы или нового анализа.`;
+  $("particle-count").textContent = summary.count ? `Всего частиц: ${number.format(summary.count)}` : "Активных выделений нет.";
+  const scores = state.detections.map((particle) => particle.classifier_confidence).filter(Number.isFinite);
+  $("confidence-summary").textContent = scores.length ? `Уверенность классификации: ${percent.format(scores.reduce((sum, score) => sum + score, 0) / scores.length)}` : "Уверенность классификации: —";
+  $("manual-review-note").hidden = !summary.manual_count && !state.deletedIds.size;
+  $("manual-review-note").textContent = `Ручных решений: ${summary.manual_count}; добавлено рамок: ${state.additions.length}; удалено: ${state.deletedIds.size}. Учтены в сводке и отчёте; действуют до обновления страницы или нового анализа.`;
+  $("undo-delete").hidden = !state.deletedHistory.length;
   updateVisibleParticles();
   if ($("particle-dialog").open && state.selectedId !== null) renderParticleDetail();
 }
@@ -214,13 +250,14 @@ function openParticle(id) {
 
 function renderParticleDetail() {
   const particle = state.detections.find((item) => item.id === state.selectedId);
-  const source = state.result.detections.find((item) => item.id === state.selectedId);
+  const source = allSources().find((item) => item.id === state.selectedId);
   if (!particle || !source) return;
   $("particle-title").textContent = `Частица № ${particle.id}`;
   $("particle-status").textContent = `${COATING_LABELS[particle.coating_status]}${particle.manual_review ? " · вручную" : ""}`;
   $("particle-status").dataset.status = particle.coating_status;
   const modelClass = source.coating_class === "coated" ? "покрыта" : "непокрыта / недостаточное покрытие";
-  $("particle-model-info").textContent = `Модель: ${modelClass} · уверенность ${percent.format(source.classifier_confidence)}`;
+  $("particle-model-info").textContent = source.source === "manual" ? "Частица выделена вручную. Уверенность модели не определялась."
+    : `Модель: ${modelClass} · уверенность ${percent.format(source.classifier_confidence)}`;
   $("particle-dimensions").textContent = `Рамка: ${number.format(particle.width_px)} × ${number.format(particle.height_px)} px`;
   const crop = cropBounds(particle.bbox, state.originalImage.naturalWidth, state.originalImage.naturalHeight);
   const canvas = $("particle-crop");
@@ -230,10 +267,13 @@ function renderParticleDetail() {
   const context = canvas.getContext("2d");
   context.drawImage(state.originalImage, crop.left, crop.top, crop.width, crop.height, 0, 0, crop.width, crop.height);
   drawFrames(context, [particle], { x: -crop.left, y: -crop.top, lineWidth: Math.max(1, Math.min(crop.width, crop.height) / 200) });
-  $("manual-review-actions").hidden = source.coating_status !== "uncertain";
+  $("manual-review-actions").hidden = source.coating_status !== "uncertain" && source.source !== "manual";
+  $("manual-review-actions").querySelector("p").textContent = source.source === "manual" ? "Определите класс выделенной частицы:" : "Определите покрытие спорной частицы:";
   $("mark-coated").setAttribute("aria-pressed", String(particle.manual_review === "coated"));
   $("mark-uncoated").setAttribute("aria-pressed", String(particle.manual_review === "uncoated"));
-  $("reset-review").hidden = !particle.manual_review;
+  $("mark-uncertain").hidden = source.source !== "manual";
+  $("mark-uncertain").setAttribute("aria-pressed", String(particle.manual_review === "uncertain"));
+  $("reset-review").hidden = source.source === "manual" || !particle.manual_review;
   const visible = getVisibleDetections();
   const index = visible.findIndex((item) => item.id === particle.id);
   $("previous-particle").disabled = !visible.length || index === 0;
@@ -242,12 +282,33 @@ function renderParticleDetail() {
 
 function reviewParticle(status) {
   if (state.selectedId === null) return;
-  state.overrides = setManualReview(state.result.detections, state.overrides, state.selectedId, status);
+  state.overrides = setManualReview(allSources(), state.overrides, state.selectedId, status);
   renderReview();
 }
 $("mark-coated").addEventListener("click", () => reviewParticle("coated"));
 $("mark-uncoated").addEventListener("click", () => reviewParticle("uncoated"));
+$("mark-uncertain").addEventListener("click", () => reviewParticle("uncertain"));
 $("reset-review").addEventListener("click", () => reviewParticle(null));
+$("draw-particle").addEventListener("click", () => {
+  if (state.busy || !state.result) return;
+  setDrawing(!imageViewer.drawing);
+  $("image-stage").focus({ preventScroll: true });
+});
+$("delete-particle").addEventListener("click", () => {
+  if (state.selectedId === null) return;
+  const id = state.selectedId;
+  state.deletedIds.add(id);
+  state.deletedHistory.push(id);
+  $("particle-dialog").close();
+  state.selectedId = null;
+  renderReview();
+});
+$("undo-delete").addEventListener("click", () => {
+  const id = state.deletedHistory.pop();
+  if (id === undefined) return;
+  state.deletedIds.delete(id);
+  renderReview();
+});
 $("close-particle").addEventListener("click", () => $("particle-dialog").close());
 $("particle-dialog").addEventListener("close", () => {
   state.selectedId = null;
@@ -296,10 +357,42 @@ $("download-image").addEventListener("click", async (event) => {
   }
 });
 
+$("generate-report").addEventListener("click", async () => {
+  if (!state.result || state.busy || state.reportBusy) return;
+  const filename = `${state.file.name.replace(/\.[^.]+$/, "")}_report.pdf`;
+  const payload = {
+    image: state.result.image, original_image: state.result.original_image, detections: state.detections,
+    initial_detected_count: state.result.detections.length, manual_added_count: state.additions.length,
+    deleted_count: state.deletedIds.size, model: state.result.model, classifier: state.result.classifier,
+    classifier_confidence_threshold: state.result.classifier_confidence_threshold, timezone_offset_minutes: new Date().getTimezoneOffset(),
+  };
+  state.reportBusy = true;
+  showError();
+  updateControls();
+  try {
+    const response = await fetch("/api/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(typeof result.detail === "string" ? result.detail : "Не удалось сформировать отчёт. Проверьте данные выделений.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (error) { showError(error.message); }
+  finally { state.reportBusy = false; updateControls(); }
+});
+
 $("analysis-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.file || state.busy || !state.ready) return;
   state.busy = true;
+  setDrawing(false);
   showError();
   $("processing-overlay").hidden = false;
   $("image-stage").setAttribute("aria-busy", "true");

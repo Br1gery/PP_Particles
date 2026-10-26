@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fitSize, constrainOffset, zoomAt, detectionAt } from "../image-viewer.mjs";
+import { fitSize, constrainOffset, zoomAt, detectionAt, imagePoint } from "../image-viewer.mjs";
 
 test("fit keeps the whole image visible without distortion or upsampling", () => {
   assert.deepEqual(fitSize(2000, 1000, 1000, 600), { width: 1000, height: 500 });
@@ -54,4 +54,12 @@ test("hover ignores empty margins and prefers the smaller overlapping particle",
   assert.equal(detectionAt({ x: 325, y: 75 }, [large, small], view, displayed, original), small);
   assert.equal(detectionAt({ x: 10, y: 10 }, [large, small], view, displayed, original), null);
   assert.equal(detectionAt({ x: 325, y: 75 }, [], view, displayed, original), null);
+});
+
+test("manual drawing maps screen coordinates back to the source after zoom and pan", () => {
+  const view = { scale: 2, x: -400, y: -200 };
+  const displayed = { width: 1000, height: 500 };
+  const original = { width: 2000, height: 1000 };
+  assert.deepEqual(imagePoint({ x: 100, y: 100 }, view, displayed, original), { x: 500, y: 300 });
+  assert.deepEqual(imagePoint({ x: -1000, y: 2000 }, view, displayed, original), { x: 0, y: 1000 });
 });
