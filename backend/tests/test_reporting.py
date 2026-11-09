@@ -7,7 +7,7 @@ from pypdf import PdfReader
 
 from backend.config import Settings
 from backend.main import create_app
-from backend.tests.test_api import MemoryDetector, image_bytes
+from backend.tests.test_api import MemoryDetector, image_bytes, unavailable_shape
 
 
 def report_payload():
@@ -29,7 +29,7 @@ class ReportTests(unittest.TestCase):
     def setUp(self):
         self.settings = Settings()
         self.detector = MemoryDetector(self.settings)
-        self.client = TestClient(create_app(self.settings, self.detector))
+        self.client = TestClient(create_app(self.settings, self.detector, unavailable_shape()))
         self.client.__enter__()
 
     def tearDown(self):

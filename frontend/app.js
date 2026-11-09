@@ -1,18 +1,25 @@
 "use strict";
 
-import { ImageViewer } from "./image-viewer.mjs";
-import { COATING_LABELS, reviewedDetections, setManualReview, createManualParticle, visibleDetections, summarizeCoverage, cropBounds, drawFrames } from "./particle-review.mjs";
+import { ImageViewer } from "./image-viewer.mjs?v=20261109-1";
+import { COATING_LABELS, reviewedDetections, setManualReview, createManualParticle, visibleDetections, summarizeCoverage, cropBounds, drawFrames } from "./particle-review.mjs?v=20261109-1";
+import { SHAPE_LABELS, shapeDetections, summarizeShapes, currentContourProcessing, contourProcessingSummary,
+  ellipsePolygon, createManualShape, setShapeReview, shapeReportParticles } from "./shape-review.mjs?v=20261109-1";
 
 const $ = (id) => document.getElementById(id);
 const statuses = ["coated", "uncertain", "uncoated"];
+const shapeStatuses = ["rounded", "irregular", "edge"];
+const isShape = () => state.mode === "shape";
+const labelFor = (particle) => isShape() ? SHAPE_LABELS[particle.form] : COATING_LABELS[particle.coating_status];
 const state = {
+  mode: "coverage",
   file: null, previewUrl: null, result: null, originalImage: null,
   ready: false, busy: false, exporting: false, reportBusy: false, connectionMessage: "Подключение…",
   view: "original", overrides: new Map(), filters: new Set(statuses), detections: [], selectedId: null,
-  additions: [], deletedIds: new Set(), deletedHistory: [],
+  additions: [], deletedIds: new Set(), deletedHistory: [], editingId: null, manualShapeApiReady: false,
 };
 const supported = /\.(jpe?g|png|webp|bmp|tiff?)$/i;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 });
+const circularityNumber = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 4 });
 const percent = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1 });
 let healthTimer;
 const imageViewer = new ImageViewer({
@@ -20,6 +27,8 @@ const imageViewer = new ImageViewer({
   zoomIn: $("zoom-in"), zoomOut: $("zoom-out"), reset: $("zoom-reset"), value: $("zoom-value"),
   tooltip: $("particle-tooltip"), overlay: $("annotation-layer"), onSelect: openParticle,
   onDraw: addParticle, onDrawCancel: () => setDrawing(false),
+  onPolygon: commitShapePolygon,
+  onDraftChange: (count) => { $("finish-contour").disabled=count<3; $("undo-contour-point").disabled=!count; },
 });
 
 function showError(message = "") {
@@ -29,12 +38,16 @@ function showError(message = "") {
 
 function updateControls() {
   imageViewer.setEnabled(!state.busy);
+  $("mode-coverage").disabled = state.busy;
+  $("mode-shape").disabled = state.busy;
   $("analyze-button").disabled = state.busy || !state.file || !state.ready;
   $("analyze-button").textContent = state.busy ? "Распознавание…" : "Распознать частицы";
   $("file-input").disabled = state.busy;
-  for (const status of statuses) $(`filter-${status}`).disabled = state.busy;
+  for (const status of [...statuses, ...shapeStatuses]) $(`filter-${status}`).disabled = state.busy;
   $("particle-picker").disabled = state.busy || !getVisibleDetections().length;
   $("draw-particle").disabled = state.busy || !state.result;
+  $("shape-draw-tool").hidden = !isShape();
+  $("shape-draw-tool").disabled = state.busy || !state.result;
   $("undo-delete").disabled = state.busy;
   $("generate-report").disabled = state.busy || state.reportBusy || !state.result;
   $("generate-report").textContent = state.reportBusy ? "Формирование PDF…" : "Сформировать отчёт";
@@ -47,32 +60,66 @@ function updateControls() {
 
 async function checkHealth() {
   clearTimeout(healthTimer);
+  const mode = state.mode;
   try {
-    const response = await fetch("/api/health", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    const response = await fetch(mode === "shape" ? "/api/shape/health" : "/api/health", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    if (mode !== state.mode) return;
+    if (response.status === 404) {
+      state.ready = false;
+      state.connectionMessage = mode === "shape"
+        ? "Сервер ещё не поддерживает округлость. Перезапустите backend и обновите страницу."
+        : "API не найден. Откройте сайт через запущенный backend: http://127.0.0.1:8000/.";
+      return;
+    }
     const health = await response.json();
+    if (mode !== state.mode) return;
     state.ready = response.ok && health.status === "ready";
+    if (mode === "shape") state.manualShapeApiReady=health.manual_shape_annotations===true;
     state.connectionMessage = health.error || "Модель временно недоступна.";
+    if (mode === "shape" && state.ready && !currentContourProcessing(health)) {
+      state.ready = false;
+      state.connectionMessage = "Запущена старая обработка контуров. Перезапустите backend и обновите страницу.";
+    }
   } catch {
+    if (mode !== state.mode) return;
     state.ready = false;
     state.connectionMessage = "Нет соединения с сервером. Проверьте, запущено ли приложение.";
   } finally {
-    updateControls();
-    healthTimer = setTimeout(checkHealth, state.ready ? 30000 : 10000);
+    if (mode === state.mode) {
+      updateControls();
+      clearTimeout(healthTimer);
+      healthTimer = setTimeout(checkHealth, state.ready ? 30000 : 10000);
+    }
   }
 }
 
-function getVisibleDetections() { return visibleDetections(state.detections, state.filters); }
-function allSources() { return [...(state.result?.detections || []), ...state.additions]; }
+function getVisibleDetections() {
+  return isShape() ? state.detections.filter((p) => state.filters.has(p.form)) : visibleDetections(state.detections, state.filters);
+}
+function allSources() { return [...(isShape() ? state.result?.particles || [] : state.result?.detections || []), ...state.additions]; }
 
 function setDrawing(enabled) {
-  imageViewer.setDrawing(enabled);
+  const tool=isShape() ? $("shape-draw-tool").value : "rectangle";
+  imageViewer.setDrawing(enabled,tool);
+  if (!enabled) state.editingId=null;
   $("draw-particle").setAttribute("aria-pressed", String(enabled));
   $("draw-particle").textContent = enabled ? "Отменить выделение" : "Выделить частицу";
   $("draw-help").hidden = !enabled;
+  $("finish-contour").hidden = !enabled || tool!=="polygon";
+  $("undo-contour-point").hidden = !enabled || tool!=="polygon";
+  $("draw-help").textContent = tool === "polygon"
+    ? "Кликните по границе. Enter или первая точка — завершить; Backspace — убрать точку; Escape — отменить. Shift + перетаскивание — перемещение."
+    : "Обведите частицу перетаскиванием. Escape — отмена.";
+  if (enabled && state.editingId!==null) $("draw-help").textContent = `Новый контур частицы № ${state.editingId}. ` + $("draw-help").textContent;
 }
 
 function addParticle(bbox) {
   if (state.busy || !state.result) return;
+  if (isShape()) {
+    try { commitShapePolygon(ellipsePolygon(bbox,state.originalImage.naturalWidth,state.originalImage.naturalHeight)); }
+    catch (error) { showError(error.message); }
+    return;
+  }
   try {
     if (state.detections.length >= 5000 || state.additions.length >= 5000) throw new Error("Достигнут лимит 5000 выделений.");
     const id = Math.max(0, ...allSources().map((particle) => particle.id)) + 1;
@@ -84,6 +131,21 @@ function addParticle(bbox) {
   } catch (error) { showError(error.message); }
 }
 
+function commitShapePolygon(polygon) {
+  if (state.busy || !state.result || !isShape()) return;
+  try {
+    const width=state.originalImage.naturalWidth,height=state.originalImage.naturalHeight;
+    let id=state.editingId;
+    if (id!==null) state.overrides=setShapeReview(allSources(),state.overrides,id,{polygon_px:polygon,image_width:width,image_height:height});
+    else {
+      if (state.detections.length>=5000 || state.additions.length>=5000) throw new Error("Достигнут лимит 5000 выделений.");
+      id=Math.max(0,...allSources().map(p=>p.index))+1;
+      state.additions.push(createManualShape(id,polygon,width,height));
+    }
+    setDrawing(false);showError();renderReview();openParticle(id);
+  } catch (error) { showError(error.message); }
+}
+
 function updateVisibleParticles() {
   const visible = getVisibleDetections();
   const isResult = state.view === "result" && Boolean(state.result);
@@ -91,7 +153,7 @@ function updateVisibleParticles() {
   $("particle-filters").hidden = !isResult;
   $("visible-count").textContent = `Показано: ${number.format(visible.length)} из ${number.format(state.detections.length)}`;
   const options = [new Option("Открыть частицу…", "")];
-  for (const particle of visible) options.push(new Option(`№ ${particle.id} · ${COATING_LABELS[particle.coating_status]}`, String(particle.id)));
+  for (const particle of visible) options.push(new Option(`№ ${particle.id} · ${labelFor(particle)}`, String(particle.id)));
   $("particle-picker").replaceChildren(...options);
   $("particle-picker").disabled = state.busy || !visible.length;
 }
@@ -117,9 +179,9 @@ function resetReview() {
   state.deletedIds = new Set();
   state.deletedHistory = [];
   setDrawing(false);
-  state.filters = new Set(statuses);
+  state.filters = new Set(isShape() ? shapeStatuses : statuses);
   state.detections = [];
-  for (const status of statuses) $(`filter-${status}`).checked = true;
+  for (const status of [...statuses, ...shapeStatuses]) $(`filter-${status}`).checked = true;
   $("manual-review-note").hidden = true;
   $("undo-delete").hidden = true;
 }
@@ -145,6 +207,9 @@ function selectFile(file) {
   $("view-tabs").hidden = true;
   $("result-summary").hidden = true;
   $("coverage-summary").hidden = true;
+  $("shape-summary").hidden = true;
+  $("shape-explanation").hidden = true;
+  $("contour-processing").hidden = true;
   $("limit-message").hidden = true;
   $("download-image").removeAttribute("href");
   $("preview-image").hidden = true;
@@ -188,7 +253,7 @@ $("preview-image").addEventListener("error", () => {
     : "Предпросмотр появится после распознавания.";
 });
 
-for (const status of statuses) {
+for (const status of [...statuses, ...shapeStatuses]) {
   $(`filter-${status}`).addEventListener("change", (event) => {
     if (event.target.checked) state.filters.add(status);
     else state.filters.delete(status);
@@ -201,6 +266,28 @@ $("particle-picker").addEventListener("change", (event) => {
 });
 
 function renderReview() {
+  if (isShape()) {
+    state.detections = shapeDetections(state.result.particles, state.deletedIds, state.additions, state.overrides);
+    const summary = summarizeShapes(state.detections);
+    const hasManualClasses = state.detections.some(particle => particle.manual_form);
+    const modelClasses = state.result.classification_source === "model";
+    $("rounded-rule").textContent = hasManualClasses ? "С учётом ручной разметки" : modelClasses ? "Класс YOLO: rounded" : `C ≥ ${circularityNumber.format(state.result.circularity_threshold)}`;
+    $("irregular-rule").textContent = hasManualClasses ? "С учётом ручной разметки" : modelClasses ? "Класс YOLO: irregular" : `C < ${circularityNumber.format(state.result.circularity_threshold)}`;
+    $("contour-processing").textContent = contourProcessingSummary(state.result, state.detections);
+    $("rounded-count").textContent = number.format(summary.rounded);
+    $("irregular-count").textContent = number.format(summary.irregular);
+    $("edge-count").textContent = number.format(summary.edge);
+    $("rounded-percent").textContent = summary.rounded_percent === null ? "—" : percent.format(summary.rounded_percent / 100);
+    $("shape-denominator").textContent = `Среди ${number.format(summary.shape_denominator)} частиц вне границы`;
+    $("particle-count").textContent = `Всего частиц: ${number.format(summary.total)}`;
+    $("confidence-summary").textContent = `Медиана круглости: ${summary.median_circularity === null ? "—" : circularityNumber.format(summary.median_circularity)} · Медиана диаметра: ${summary.median_equivalent_diameter_px === null ? "—" : number.format(summary.median_equivalent_diameter_px) + " px"}`;
+    $("manual-review-note").hidden = !state.deletedIds.size && !state.additions.length && !state.overrides.size;
+    $("manual-review-note").textContent = `Добавлено вручную: ${state.additions.length}; ручных правок: ${state.overrides.size}; удалено: ${state.deletedIds.size}. Учтено в сводке и отчёте; действует до обновления страницы или нового анализа.`;
+    $("undo-delete").hidden = !state.deletedHistory.length;
+    updateVisibleParticles();
+    if ($("particle-dialog").open) renderParticleDetail();
+    return;
+  }
   state.detections = reviewedDetections(state.result.detections, state.overrides, state.additions, state.deletedIds);
   const summary = summarizeCoverage(state.detections);
   $("coated-count").textContent = number.format(summary.coated_count);
@@ -227,12 +314,22 @@ async function renderResult(result) {
   $("viewer-title").textContent = "Результат";
   $("view-tabs").hidden = false;
   $("result-summary").hidden = false;
-  $("coverage-summary").hidden = false;
-  $("uncertain-description").textContent = `Уверенность ниже ${percent.format(result.classifier_confidence_threshold)}`;
-  $("confidence-summary").textContent = result.statistics.mean_classifier_confidence === null
-    ? "Уверенность классификации: —"
-    : `Уверенность классификации: ${percent.format(result.statistics.mean_classifier_confidence)}`;
-  $("limit-message").hidden = !result.statistics.detection_limit_reached;
+  $("coverage-summary").hidden = isShape();
+  $("shape-summary").hidden = !isShape();
+  $("shape-explanation").hidden = !isShape();
+  $("contour-processing").hidden = !isShape();
+  if (isShape()) {
+    const modelClasses = result.classification_source === "model";
+    $("rounded-rule").textContent = modelClasses ? "Класс YOLO: rounded" : `C ≥ ${circularityNumber.format(result.circularity_threshold)}`;
+    $("irregular-rule").textContent = modelClasses ? "Класс YOLO: irregular" : `C < ${circularityNumber.format(result.circularity_threshold)}`;
+    $("shape-explanation").textContent = (modelClasses
+      ? "Форму определяет обученная YOLO. Круглость C = 4πA / P² измеряется отдельно и не меняет класс модели."
+      : "YOLO находит частицы; форма определяется по круглости C = 4πA / P². Чем ближе C к 1, тем круглее контур.")
+      + ` Ручной класс имеет приоритет. Модель: ${result.model}${result.model_sha256 ? " · " + result.model_sha256.slice(0, 12) : ""}. Анализируется весь снимок, включая подписи.`;
+    if (result.mask_quality_warning) $("shape-explanation").textContent += " " + result.mask_quality_warning;
+  }
+  if (!isShape()) $("uncertain-description").textContent = `Уверенность ниже ${percent.format(result.classifier_confidence_threshold)}`;
+  $("limit-message").hidden = !(isShape() ? result.detection_limit_reached : result.statistics.detection_limit_reached);
   $("limit-message").textContent = `Детектор достиг лимита ${number.format(result.max_detections)} рамок до удаления дубликатов. На изображении могут быть другие частицы.`;
   $("download-image").href = "#";
   $("download-image").title = "Скачать видимые рамки с учётом фильтров и ручных решений";
@@ -250,15 +347,23 @@ function openParticle(id) {
 
 function renderParticleDetail() {
   const particle = state.detections.find((item) => item.id === state.selectedId);
-  const source = allSources().find((item) => item.id === state.selectedId);
+  const source = isShape() ? particle : allSources().find((item) => item.id === state.selectedId);
   if (!particle || !source) return;
   $("particle-title").textContent = `Частица № ${particle.id}`;
-  $("particle-status").textContent = `${COATING_LABELS[particle.coating_status]}${particle.manual_review ? " · вручную" : ""}`;
-  $("particle-status").dataset.status = particle.coating_status;
+  $("particle-status").textContent = `${labelFor(particle)}${particle.manual_review ? " · вручную" : ""}`;
+  $("particle-status").dataset.status = isShape() ? particle.form : particle.coating_status;
   const modelClass = source.coating_class === "coated" ? "покрыта" : "непокрыта / недостаточное покрытие";
   $("particle-model-info").textContent = source.source === "manual" ? "Частица выделена вручную. Уверенность модели не определялась."
     : `Модель: ${modelClass} · уверенность ${percent.format(source.classifier_confidence)}`;
   $("particle-dimensions").textContent = `Рамка: ${number.format(particle.width_px)} × ${number.format(particle.height_px)} px`;
+  if (isShape()) {
+    const sourceInfo = particle.source === "manual" ? "Ручная разметка. Уверенность YOLO не определялась."
+      : (particle.class_name === "rounded" || particle.class_name === "irregular" ? `Исходный класс YOLO: ${SHAPE_LABELS[particle.class_name]}` : "Исходная форма определена по круглости контура") + ` · Уверенность YOLO: ${percent.format(particle.confidence)}`;
+    const semanticForm = particle.manual_form || (["rounded", "irregular"].includes(particle.class_name) ? particle.class_name : particle.circularity >= .8 ? "rounded" : "irregular");
+    $("particle-model-info").textContent = `${sourceInfo} · Круглость: ${circularityNumber.format(particle.circularity)} из 1${particle.touches_border ? " · Неполный контур у границы; класс: " + SHAPE_LABELS[semanticForm] : ""}${particle.manual_contour ? " · Контур исправлен вручную" : ""}`;
+    $("particle-dimensions").textContent = `Площадь: ${number.format(particle.area_px2)} px² · Периметр: ${number.format(particle.perimeter_px)} px · Эквивалентный диаметр: ${number.format(particle.equivalent_diameter_px)} px`;
+    if (particle.contour_refined) $("particle-model-info").textContent += ` · Контур уточнён: удалено ${number.format(particle.removed_area_percent)}% площади маски`;
+  }
   const crop = cropBounds(particle.bbox, state.originalImage.naturalWidth, state.originalImage.naturalHeight);
   const canvas = $("particle-crop");
   canvas.width = crop.width;
@@ -267,7 +372,11 @@ function renderParticleDetail() {
   const context = canvas.getContext("2d");
   context.drawImage(state.originalImage, crop.left, crop.top, crop.width, crop.height, 0, 0, crop.width, crop.height);
   drawFrames(context, [particle], { x: -crop.left, y: -crop.top, lineWidth: Math.max(1, Math.min(crop.width, crop.height) / 200) });
-  $("manual-review-actions").hidden = source.coating_status !== "uncertain" && source.source !== "manual";
+  $("manual-review-actions").hidden = isShape() || (source.coating_status !== "uncertain" && source.source !== "manual");
+  $("shape-review-actions").hidden = !isShape();
+  $("mark-rounded").setAttribute("aria-pressed",String(particle.manual_form==="rounded"));
+  $("mark-irregular").setAttribute("aria-pressed",String(particle.manual_form==="irregular"));
+  $("reset-shape-review").hidden = !state.overrides.has(particle.id);
   $("manual-review-actions").querySelector("p").textContent = source.source === "manual" ? "Определите класс выделенной частицы:" : "Определите покрытие спорной частицы:";
   $("mark-coated").setAttribute("aria-pressed", String(particle.manual_review === "coated"));
   $("mark-uncoated").setAttribute("aria-pressed", String(particle.manual_review === "uncoated"));
@@ -289,6 +398,19 @@ $("mark-coated").addEventListener("click", () => reviewParticle("coated"));
 $("mark-uncoated").addEventListener("click", () => reviewParticle("uncoated"));
 $("mark-uncertain").addEventListener("click", () => reviewParticle("uncertain"));
 $("reset-review").addEventListener("click", () => reviewParticle(null));
+for (const form of ["rounded","irregular"]) $("mark-"+form).addEventListener("click",()=>{
+  state.overrides=setShapeReview(allSources(),state.overrides,state.selectedId,{form});renderReview();
+});
+$("reset-shape-review").addEventListener("click",()=>{
+  state.overrides=setShapeReview(allSources(),state.overrides,state.selectedId,null);renderReview();
+});
+$("redraw-shape").addEventListener("click",()=>{
+  state.editingId=state.selectedId;$("particle-dialog").close();setView("result");setDrawing(true);$("image-stage").focus({preventScroll:true});
+});
+$("shape-draw-tool").addEventListener("change",()=>{if(imageViewer.drawing)setDrawing(true);});
+$("finish-contour").addEventListener("click",()=>imageViewer.finishPolygon());
+$("undo-contour-point").addEventListener("click",()=>{imageViewer.undoPolygonPoint();$("image-stage").focus({preventScroll:true});});
+document.addEventListener("keydown",event=>{if(event.key==="Escape" && imageViewer.drawing){event.preventDefault();setDrawing(false);}});
 $("draw-particle").addEventListener("click", () => {
   if (state.busy || !state.result) return;
   setDrawing(!imageViewer.drawing);
@@ -359,8 +481,17 @@ $("download-image").addEventListener("click", async (event) => {
 
 $("generate-report").addEventListener("click", async () => {
   if (!state.result || state.busy || state.reportBusy) return;
+  if (isShape() && (state.additions.length || state.overrides.size) && !state.manualShapeApiReady) {
+    showError("Перезапустите backend: запущенная версия ещё не поддерживает отчёты с ручной разметкой формы."); return;
+  }
   const filename = `${state.file.name.replace(/\.[^.]+$/, "")}_report.pdf`;
-  const payload = {
+  const payload = isShape() ? {
+    image: state.result.image, original_image: state.result.original_image,
+    model: state.result.model, model_sha256: state.result.model_sha256, classification_source: state.result.classification_source,
+    contour_processing_version: state.result.contour_processing_version,
+    particles: shapeReportParticles(state.detections),
+    timezone_offset_minutes: new Date().getTimezoneOffset(),
+  } : {
     image: state.result.image, original_image: state.result.original_image, detections: state.detections,
     initial_detected_count: state.result.detections.length, manual_added_count: state.additions.length,
     deleted_count: state.deletedIds.size, model: state.result.model, classifier: state.result.classifier,
@@ -370,7 +501,7 @@ $("generate-report").addEventListener("click", async () => {
   showError();
   updateControls();
   try {
-    const response = await fetch("/api/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const response = await fetch(isShape() ? "/api/shape/report" : "/api/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     if (!response.ok) {
       const result = await response.json();
       throw new Error(typeof result.detail === "string" ? result.detail : "Не удалось сформировать отчёт. Проверьте данные выделений.");
@@ -400,12 +531,13 @@ $("analysis-form").addEventListener("submit", async (event) => {
   const data = new FormData();
   data.append("file", state.file);
   try {
-    const response = await fetch("/api/predict", { method: "POST", body: data });
+    const response = await fetch(isShape() ? "/api/shape/predict" : "/api/predict", { method: "POST", body: data });
     const result = await response.json();
     if (!response.ok) {
       const message = Array.isArray(result.detail) ? result.detail.map((item) => item.msg).join("; ") : result.detail;
       throw new Error(message || "Не удалось распознать изображение. Попробуйте снова.");
     }
+    if (isShape() && !currentContourProcessing(result)) throw new Error("Получен результат старой обработки контуров. Перезапустите backend и повторите анализ.");
     await renderResult(result);
   } catch (error) {
     showError(error instanceof TypeError ? "Нет соединения с сервером. Проверьте подключение и повторите попытку." : error.message);
@@ -417,4 +549,25 @@ $("analysis-form").addEventListener("submit", async (event) => {
   }
 });
 
+for (const mode of ["coverage", "shape"]) {
+  $(`mode-${mode}`).addEventListener("click", () => {
+    if (state.busy || mode === state.mode) return;
+    state.mode = mode;
+    state.ready = false;
+    state.connectionMessage = "Подключение…";
+    $("mode-coverage").setAttribute("aria-pressed", String(!isShape()));
+    $("mode-shape").setAttribute("aria-pressed", String(isShape()));
+    $("analysis-description").textContent = isShape()
+      ? "Загрузите изображение порошка, чтобы найти контуры частиц и оценить их округлость."
+      : "Загрузите изображение порошка, чтобы найти частицы и оценить их покрытие.";
+    $("coverage-filters").hidden = isShape();
+    $("shape-filters").hidden = !isShape();
+    $("confidence-summary").title = isShape() ? "Геометрические показатели частиц вне границы изображения" : "Средняя уверенность классификатора покрытия";
+    if (state.file) selectFile(state.file);
+    else resetReview();
+    showError();
+    updateControls();
+    checkHealth();
+  });
+}
 checkHealth();

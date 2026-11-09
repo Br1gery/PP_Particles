@@ -5,14 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Распознавание порошковых частиц на изображении.">
   <title>Распознавание частиц — PowderScope</title>
-  <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" type="module"></script>
+  <link rel="stylesheet" href="/styles.css?v=20261109-1">
+  <script src="/app.js?v=20261109-1" type="module"></script>
 </head>
 <body>
   <main class="page">
     <header class="page-header">
       <h1>Распознавание частиц</h1>
-      <p>Загрузите изображение порошка, чтобы найти частицы и оценить их покрытие.</p>
+      <p id="analysis-description">Загрузите изображение порошка, чтобы найти частицы и оценить их покрытие.</p>
+      <div class="view-tabs analysis-mode" role="group" aria-label="Вид анализа">
+        <button id="mode-coverage" type="button" aria-pressed="true">Покрытие</button>
+        <button id="mode-shape" type="button" aria-pressed="false">Округлость</button>
+      </div>
     </header>
 
     <form id="analysis-form" class="upload-card">
@@ -44,16 +48,32 @@
         <div class="coverage-stat uncertain-stat"><span><i class="category-dot" aria-hidden="true"></i>Спорные</span><strong id="uncertain-count">—</strong><small id="uncertain-description">Низкая уверенность классификатора</small></div>
         <div class="coverage-stat"><span>Покрытие</span><strong id="coverage-percent">—</strong><small>Доля покрытых среди всех найденных частиц, с учётом ручной оценки</small></div>
       </div>
+      <div id="shape-summary" class="coverage-summary" aria-label="Оценка округлости" hidden>
+        <div class="coverage-stat coated-stat"><span><i class="category-dot" aria-hidden="true"></i>Округлые</span><strong id="rounded-count">—</strong><small id="rounded-rule">Класс модели или оценка по контуру</small></div>
+        <div class="coverage-stat uncoated-stat"><span><i class="category-dot" aria-hidden="true"></i>Неокруглые</span><strong id="irregular-count">—</strong><small id="irregular-rule">Класс модели или оценка по контуру</small></div>
+        <div class="coverage-stat uncertain-stat"><span><i class="category-dot" aria-hidden="true"></i>На границе</span><strong id="edge-count">—</strong><small>Исключены из доли округлых</small></div>
+        <div class="coverage-stat"><span>Доля округлых</span><strong id="rounded-percent">—</strong><small id="shape-denominator"></small></div>
+      </div>
+      <p id="shape-explanation" class="manual-review-note" hidden>Круглость C = 4πA / P²: чем ближе к 1, тем круглее контур. Это геометрический показатель, не уверенность модели. Анализируется всё изображение, включая подписи и масштабную линейку, если они есть.</p>
+      <p id="contour-processing" class="manual-review-note" role="status" hidden></p>
       <div id="particle-filters" class="particle-filters" hidden>
         <div class="annotation-actions">
           <button id="draw-particle" type="button" aria-pressed="false">Выделить частицу</button>
+          <select id="shape-draw-tool" aria-label="Способ ручного выделения" hidden><option value="ellipse">Эллипс</option><option value="polygon">Контур по точкам</option></select>
+          <button id="finish-contour" type="button" hidden disabled>Завершить контур</button>
+          <button id="undo-contour-point" type="button" hidden disabled>Убрать точку</button>
           <button id="undo-delete" type="button" hidden>Отменить удаление</button>
           <span id="draw-help" role="status" hidden>Обведите частицу перетаскиванием. Escape — отмена.</span>
         </div>
-        <div class="filter-options" role="group" aria-label="Показать группы частиц">
+        <div id="coverage-filters" class="filter-options" role="group" aria-label="Показать группы покрытия">
           <label class="filter-chip coated-filter"><input id="filter-coated" type="checkbox" checked>Покрытые</label>
           <label class="filter-chip uncertain-filter"><input id="filter-uncertain" type="checkbox" checked>Спорные</label>
           <label class="filter-chip uncoated-filter"><input id="filter-uncoated" type="checkbox" checked>Непокрытые</label>
+        </div>
+        <div id="shape-filters" class="filter-options" role="group" aria-label="Показать группы по форме" hidden>
+          <label class="filter-chip coated-filter"><input id="filter-rounded" type="checkbox" checked>Округлые</label>
+          <label class="filter-chip uncoated-filter"><input id="filter-irregular" type="checkbox" checked>Неокруглые</label>
+          <label class="filter-chip uncertain-filter"><input id="filter-edge" type="checkbox" checked>На границе</label>
         </div>
         <div class="particle-picker-row">
           <span id="visible-count" role="status" aria-live="polite"></span>
@@ -108,6 +128,15 @@
         <button id="mark-uncoated" type="button" aria-pressed="false">Непокрыта</button>
         <button id="mark-uncertain" type="button" aria-pressed="false" hidden>Спорная</button>
         <button id="reset-review" type="button" hidden>Отменить ручной выбор</button>
+      </div>
+    </div>
+    <div id="shape-review-actions" class="manual-review-actions" hidden>
+      <p>Определите форму частицы:</p>
+      <div class="manual-review-buttons">
+        <button id="mark-rounded" type="button" aria-pressed="false">Округлая</button>
+        <button id="mark-irregular" type="button" aria-pressed="false">Неокруглая</button>
+        <button id="redraw-shape" type="button">Изменить контур</button>
+        <button id="reset-shape-review" type="button" hidden>Отменить правки</button>
       </div>
     </div>
     <button id="delete-particle" class="delete-particle" type="button">Удалить выделение</button>

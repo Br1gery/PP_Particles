@@ -5,29 +5,34 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from backend.config import ROOT, Settings
+from backend.config import ROOT, Settings, CONTOUR_PROCESSING_VERSION
+from backend.frontend import FrontendFiles
 from backend.inference import Detector, InvalidImage, ModelBusy, ModelUnavailable
 from backend.schemas import Health, Prediction
 from backend.report_schemas import ReportRequest
+from backend.shape_analysis import ShapeAnalyzer, ShapePrediction
+from backend.shape_reporting import ShapeReportRequest
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(settings: Settings | None = None, detector: Detector | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, detector: Detector | None = None,
+               shape_analyzer: ShapeAnalyzer | None = None) -> FastAPI:
     settings = settings or Settings()
     detector = detector or Detector(settings)
+    shape_analyzer = shape_analyzer or ShapeAnalyzer(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await run_in_threadpool(detector.load)
+        await run_in_threadpool(shape_analyzer.load)
         yield
 
     app = FastAPI(
-        title="PowderScope API", version="1.0.0",
-        description="YOLO26s находит частицы, ResNet18 определяет покрытие. Координаты рамок — в пикселях исходного изображения после коррекции EXIF.",
+        title="PowderScope API", version="1.1.0",
+        description="Анализ покрытия (YOLO26s + ResNet18) и округлости (YOLO26 segmentation). Все координаты в пикселях после коррекции EXIF; API округлости возвращает bbox в формате xywh, API покрытия — xyxy.",
         lifespan=lifespan,
     )
 
@@ -45,6 +50,20 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
         )
         return JSONResponse(payload.model_dump(mode="json"), status_code=200 if detector.ready else 503)
 
+    @app.get("/api/shape/health", tags=["Shape"])
+    def shape_health():
+        return JSONResponse({"status": "ready" if shape_analyzer.ready else "unavailable",
+                             "model": settings.shape_model_path.name, "device": shape_analyzer.device,
+                             "model_sha256": getattr(shape_analyzer, "model_sha256", None),
+                             "classes": getattr(shape_analyzer, "classes", {}),
+                             "classification_source": getattr(shape_analyzer, "classification_source", None),
+                             "inference_mode": "nms",
+                             "contour_processing_version": CONTOUR_PROCESSING_VERSION,
+                             "manual_shape_annotations": True,
+                             "weights_changed": getattr(shape_analyzer, "weights_changed", False),
+                             "circularity_threshold": settings.circularity_threshold,
+                             "error": getattr(shape_analyzer, "unavailable_reason", shape_analyzer.error)}, status_code=200 if shape_analyzer.ready else 503)
+
     @app.post("/api/predict", response_model=Prediction, tags=["Detection"], responses={
         400: {"description": "Поврежденное изображение или неподдерживаемый формат"},
         413: {"description": "Файл превышает лимит"},
@@ -54,6 +73,13 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
     def predict(
         file: Annotated[UploadFile, File(description="JPEG, PNG, WEBP, BMP или однокадровый TIFF, до 20 МБ / 25 Мп")],
     ):
+        return process_upload(file, detector)
+
+    @app.post("/api/shape/predict", response_model=ShapePrediction, tags=["Shape"])
+    def predict_shape(file: Annotated[UploadFile, File(description="Изображение частиц для анализа округлости")]):
+        return process_upload(file, shape_analyzer)
+
+    def process_upload(file, analyzer):
         try:
             data = file.file.read(settings.max_upload_bytes + 1)
             if len(data) > settings.max_upload_bytes:
@@ -61,7 +87,7 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
             if not data:
                 raise HTTPException(400, "Загружен пустой файл.")
             filename = Path((file.filename or "image").replace("\\", "/")).name
-            return detector.predict(data, filename)
+            return analyzer.predict(data, filename)
         except InvalidImage as exc:
             raise HTTPException(400, str(exc)) from exc
         except ModelUnavailable as exc:
@@ -90,8 +116,22 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
             raise HTTPException(500, "Не удалось сформировать PDF-отчёт. Подробности в журнале сервера.") from exc
         return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="powderscope-report.pdf"'})
 
+    @app.post("/api/shape/report", tags=["Shape"], response_class=Response,
+              responses={200: {"content": {"application/pdf": {}}}})
+    def shape_report(payload: ShapeReportRequest):
+        from backend.shape_reporting import build_shape_report
+
+        try:
+            pdf = build_shape_report(payload, settings)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Shape PDF report failed")
+            raise HTTPException(500, "Не удалось сформировать отчёт округлости.") from exc
+        return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="powderscope-shape-report.pdf"'})
+
     # Mount last, so API endpoints and documentation take precedence over static files.
-    app.mount("/", StaticFiles(directory=ROOT / "frontend", html=True), name="frontend")
+    app.mount("/", FrontendFiles(directory=ROOT / "frontend", html=True), name="frontend")
     return app
 
 

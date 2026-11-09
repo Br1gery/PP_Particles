@@ -1,4 +1,5 @@
-import { drawFrames } from "./particle-review.mjs";
+import { drawFrames } from "./particle-review.mjs?v=20261109-1";
+import { pointInPolygon } from "./shape-review.mjs?v=20261109-1";
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
@@ -43,7 +44,8 @@ export function detectionAt(point, detections, view, displayedSize, originalSize
     const [x1, y1, x2, y2] = detection.bbox;
     const area = (x2 - x1) * (y2 - y1);
     // Prefer the smaller particle when boxes overlap, so it remains reachable.
-    if (area > 0 && area < smallestArea && x >= x1 && x <= x2 && y >= y1 && y <= y2) {
+    if (area > 0 && area < smallestArea && x >= x1 && x <= x2 && y >= y1 && y <= y2
+        && (!detection.polygon_px || pointInPolygon(x, y, detection.polygon_px))) {
       match = detection;
       smallestArea = area;
     }
@@ -59,9 +61,11 @@ export function imagePoint(point, view, displayedSize, originalSize) {
 }
 
 export class ImageViewer {
-  constructor({ stage, image, controls, zoomIn, zoomOut, reset, value, tooltip, overlay, onSelect, onDraw, onDrawCancel }) {
-    Object.assign(this, { stage, image, controls, zoomIn, zoomOut, resetButton: reset, value, tooltip, overlay, onSelect, onDraw, onDrawCancel });
+  constructor({ stage, image, controls, zoomIn, zoomOut, reset, value, tooltip, overlay, onSelect, onDraw, onDrawCancel, onPolygon, onDraftChange }) {
+    Object.assign(this, { stage, image, controls, zoomIn, zoomOut, resetButton: reset, value, tooltip, overlay, onSelect, onDraw, onDrawCancel, onPolygon, onDraftChange });
     this.drawing = false;
+    this.drawingTool = "rectangle";
+    this.polygonPoints = [];
     this.view = { scale: 1, x: 0, y: 0 };
     this.baseSize = { width: 0, height: 0 };
     this.loaded = false;
@@ -91,6 +95,9 @@ export class ImageViewer {
       this.zoom(this.view.scale * Math.exp(-delta * .002), this.point(event));
     }, { passive: false });
     stage.addEventListener("dblclick", (event) => {
+      if (this.canInteract() && this.drawing && this.drawingTool === "polygon") {
+        event.preventDefault(); this.finishPolygon(); return;
+      }
       if (!this.canInteract() || this.drawing) return;
       if (this.particleAt(this.point(event))) return;
       event.preventDefault();
@@ -103,11 +110,15 @@ export class ImageViewer {
       const point = this.point(event);
       if (this.drawing && (point.x < this.view.x || point.y < this.view.y || point.x > this.view.x + this.baseSize.width * this.view.scale || point.y > this.view.y + this.baseSize.height * this.view.scale)) return;
       this.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, start: { ...this.view }, moved: false,
-        drawing: this.drawing, from: this.toImagePoint(point), to: this.toImagePoint(point) };
+        drawing: this.drawing && !event.shiftKey, from: this.toImagePoint(point), to: this.toImagePoint(point) };
       stage.setPointerCapture(event.pointerId);
     });
     stage.addEventListener("pointermove", (event) => {
       if (!this.drag) {
+        if (this.drawing && this.drawingTool === "polygon") {
+          this.polygonCursor = this.toImagePoint(this.point(event));
+          this.renderAnnotations(); return;
+        }
         if (event.pointerType !== "touch") {
           this.hoverPoint = this.point(event);
           this.updateTooltip();
@@ -135,11 +146,16 @@ export class ImageViewer {
       const clicked = !this.drag.moved && Math.hypot(event.clientX - this.drag.x, event.clientY - this.drag.y) <= 5;
       this.stopDrag();
       if (drag.drawing && this.canInteract()) {
+        if (this.drawingTool === "polygon") {
+          if (clicked) this.addPolygonPoint(end);
+          return;
+        }
         if (!clicked && Math.abs(end.x - drag.from.x) >= 2 && Math.abs(end.y - drag.from.y) >= 2) {
           this.onDraw?.([drag.from.x, drag.from.y, end.x, end.y]);
         }
         return;
       }
+      if (this.drawing) return;
       if (clicked && this.canInteract()) {
         const particle = this.particleAt(this.point(event));
         if (particle) this.onSelect?.(particle.id);
@@ -152,6 +168,12 @@ export class ImageViewer {
     }
     stage.addEventListener("keydown", (event) => {
       if (!this.canInteract()) return;
+      if (this.drawing && this.drawingTool === "polygon" && ["Enter", "Backspace", "Delete"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "Enter") this.finishPolygon();
+        else this.undoPolygonPoint();
+        return;
+      }
       if (event.key === "Escape" && this.drawing) {
         event.preventDefault();
         this.setDrawing(false);
@@ -228,12 +250,39 @@ export class ImageViewer {
     this.updateTooltip();
   }
 
-  setDrawing(enabled) {
+  setDrawing(enabled, tool = "rectangle") {
     this.stopDrag();
     this.drawing = enabled;
+    this.drawingTool = tool;
+    this.polygonPoints = [];
+    this.polygonCursor = null;
+    this.onDraftChange?.(0);
     this.stage.classList.toggle("drawing", enabled);
     this.hideTooltip();
     this.renderAnnotations();
+  }
+
+  addPolygonPoint(point) {
+    const first=this.polygonPoints[0];
+    const scaleX=this.baseSize.width*this.view.scale/this.imageWidth;
+    const scaleY=this.baseSize.height*this.view.scale/this.imageHeight;
+    if (first && this.polygonPoints.length>=3 && Math.hypot((first[0]-point.x)*scaleX,(first[1]-point.y)*scaleY)<=8) {
+      this.finishPolygon(); return;
+    }
+    if (this.polygonPoints.length>=256) return;
+    this.polygonPoints.push([point.x,point.y]);
+    this.onDraftChange?.(this.polygonPoints.length);
+    this.renderAnnotations();
+  }
+
+  undoPolygonPoint() {
+    this.polygonPoints.pop();
+    this.onDraftChange?.(this.polygonPoints.length);
+    this.renderAnnotations();
+  }
+
+  finishPolygon() {
+    if (this.polygonPoints.length>=3) this.onPolygon?.(this.polygonPoints.map(point=>[...point]));
   }
 
   toImagePoint(point) {
@@ -267,6 +316,16 @@ export class ImageViewer {
       scaleX: this.baseSize.width * this.view.scale / this.imageWidth,
       scaleY: this.baseSize.height * this.view.scale / this.imageHeight,
     });
+    if (this.drawing && this.drawingTool === "polygon") {
+      const points=[...this.polygonPoints];
+      if (this.polygonCursor) points.push([this.polygonCursor.x,this.polygonCursor.y]);
+      const sx=this.baseSize.width*this.view.scale/this.imageWidth,sy=this.baseSize.height*this.view.scale/this.imageHeight;
+      context.save();context.strokeStyle="#176d59";context.fillStyle="#176d59";context.lineWidth=2;
+      context.beginPath();points.forEach(([x,y],i)=>context[i ? "lineTo" : "moveTo"](this.view.x+x*sx,this.view.y+y*sy));context.stroke();
+      for (const [x,y] of this.polygonPoints) { context.beginPath();context.arc(this.view.x+x*sx,this.view.y+y*sy,3,0,Math.PI*2);context.fill(); }
+      context.restore();
+      return;
+    }
     if (this.drag?.drawing) {
       const { from, to } = this.drag;
       context.save();
@@ -275,7 +334,11 @@ export class ImageViewer {
       context.lineWidth = 2;
       const sx = this.baseSize.width * this.view.scale / this.imageWidth;
       const sy = this.baseSize.height * this.view.scale / this.imageHeight;
-      context.strokeRect(this.view.x + from.x * sx, this.view.y + from.y * sy, (to.x - from.x) * sx, (to.y - from.y) * sy);
+      if (this.drawingTool === "ellipse") {
+        context.beginPath();
+        context.ellipse(this.view.x+(from.x+to.x)*sx/2,this.view.y+(from.y+to.y)*sy/2,Math.abs(to.x-from.x)*sx/2,Math.abs(to.y-from.y)*sy/2,0,0,Math.PI*2);
+        context.stroke();
+      } else context.strokeRect(this.view.x + from.x * sx, this.view.y + from.y * sy, (to.x - from.x) * sx, (to.y - from.y) * sy);
       context.restore();
     }
   }
@@ -294,7 +357,7 @@ export class ImageViewer {
     this.stage.classList.toggle("particle-hover", Boolean(match));
     if (!match) return;
     this.tooltip.textContent = `№ ${match.id}`;
-    this.tooltip.dataset.coatingStatus = match.coating_status;
+    this.tooltip.dataset.coatingStatus = match.form === "edge" ? "uncertain" : match.form === "irregular" ? "uncoated" : match.coating_status;
     const viewport = this.viewport();
     const left = clamp(this.hoverPoint.x + 12, 4, Math.max(4, viewport.width - this.tooltip.offsetWidth - 4));
     const top = clamp(this.hoverPoint.y + 12, 4, Math.max(4, viewport.height - this.tooltip.offsetHeight - 4));

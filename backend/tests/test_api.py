@@ -15,6 +15,10 @@ from backend.inference import Detector, InvalidImage, decode_image
 from backend.main import create_app
 
 
+def unavailable_shape():
+    return SimpleNamespace(load=lambda: None, ready=False, error="test: shape unavailable", device="cpu")
+
+
 def image_bytes(format="PNG", size=(120, 80)):
     buffer = BytesIO()
     Image.new("RGB", size, "white").save(buffer, format=format)
@@ -65,7 +69,7 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.settings = Settings()
         self.detector = MemoryDetector(self.settings)
-        self.client = TestClient(create_app(self.settings, self.detector))
+        self.client = TestClient(create_app(self.settings, self.detector, unavailable_shape()))
         self.client.__enter__()
 
     def tearDown(self):
@@ -78,6 +82,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/").status_code, 200)
         self.assertEqual(self.client.get("/app.js").status_code, 200)
         self.assertIn("/api/predict", self.client.get("/openapi.json").json()["paths"])
+
+    def test_frontend_never_reuses_stale_html_or_module_graph(self):
+        for path in ("/", "/app.js?v=20261105-2", "/image-viewer.mjs?v=20261105-2", "/particle-review.mjs?v=20261105-2", "/shape-review.mjs?v=20261105-2", "/styles.css?v=20261105-2"):
+            first = self.client.get(path)
+            self.assertEqual(first.status_code, 200, path)
+            self.assertEqual(first.headers["cache-control"], "no-store", path)
+            cached = self.client.get(path, headers={"If-None-Match": first.headers["etag"], "If-Modified-Since": first.headers["last-modified"]})
+            self.assertEqual(cached.status_code, 200, path)
+            self.assertEqual(cached.content, first.content)
 
     def test_health_reports_loaded_model(self):
         response = self.client.get("/api/health")
@@ -187,7 +200,7 @@ class ApiTests(unittest.TestCase):
 
     def test_file_limit(self):
         settings = replace(self.settings, max_upload_bytes=10)
-        with TestClient(create_app(settings, self.detector)) as client:
+        with TestClient(create_app(settings, self.detector, unavailable_shape())) as client:
             response = client.post("/api/predict", files={"file": ("large.png", image_bytes())})
             self.assertEqual(response.status_code, 413)
 
@@ -198,7 +211,7 @@ class ApiTests(unittest.TestCase):
     def test_unavailable_model(self):
         unavailable = Detector(replace(self.settings, model_path=self.settings.model_path.with_name("missing.pt")))
         with self.assertLogs("backend.inference", level="ERROR"):
-            with TestClient(create_app(self.settings, unavailable)) as client:
+            with TestClient(create_app(self.settings, unavailable, unavailable_shape())) as client:
                 self.assertEqual(client.get("/api/health").status_code, 503)
                 self.assertEqual(client.post("/api/predict", files={"file": ("test.png", image_bytes())}).status_code, 503)
 

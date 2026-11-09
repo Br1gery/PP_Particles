@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+CONTOUR_PROCESSING_VERSION = "2026-11-06.2"
 
 
 def model_path() -> Path:
@@ -17,10 +18,20 @@ def classifier_path() -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def shape_model_path() -> Path:
+    path = Path(os.getenv("SHAPE_MODEL_PATH", "models/particle_yolo26.pt"))
+    return path if path.is_absolute() else ROOT / path
+
+
 @dataclass(frozen=True)
 class Settings:
     model_path: Path = field(default_factory=model_path)
     classifier_path: Path = field(default_factory=classifier_path)
+    shape_model_path: Path = field(default_factory=shape_model_path)
+    shape_image_size: int = 640
+    shape_confidence_threshold: float = 0.06
+    shape_duplicate_iou_threshold: float = 0.70
+    circularity_threshold: float = 0.80
     device: str = field(default_factory=lambda: os.getenv("MODEL_DEVICE", "auto"))
     max_upload_bytes: int = 20 * 1024 * 1024
     max_image_pixels: int = 25_000_000

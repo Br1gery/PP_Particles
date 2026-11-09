@@ -20,8 +20,15 @@ LABELS = {"coated": "Покрыта", "uncoated": "Непокрыта", "uncerta
 
 
 def decode_report_image(payload: ReportRequest, settings: Settings):
+    image = decode_report_source(payload.image, payload.original_image, settings)
+    if any(p.bbox[2] > image.width or p.bbox[3] > image.height for p in payload.detections):
+        raise ValueError("Одна из рамок выходит за границы изображения.")
+    return image
+
+
+def decode_report_source(image_info, original_image: str, settings: Settings):
     try:
-        prefix, content = payload.original_image.split(",", 1)
+        prefix, content = original_image.split(",", 1)
         if prefix not in ("data:image/jpeg;base64", "data:image/png;base64"):
             raise ValueError("Unsupported report image")
         data = base64.b64decode(content, validate=True)
@@ -30,10 +37,8 @@ def decode_report_image(payload: ReportRequest, settings: Settings):
         image = decode_image(data, settings.max_image_pixels)
     except (ValueError, binascii.Error, InvalidImage) as exc:
         raise ValueError("Не удалось прочитать изображение для отчёта.") from exc
-    if image.size != (payload.image.width, payload.image.height):
+    if image.size != (image_info.width, image_info.height):
         raise ValueError("Размер изображения не соответствует данным отчёта.")
-    if any(p.bbox[2] > image.width or p.bbox[3] > image.height for p in payload.detections):
-        raise ValueError("Одна из рамок выходит за границы изображения.")
     return image
 
 

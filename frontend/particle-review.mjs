@@ -1,3 +1,5 @@
+import { drawContours } from "./shape-review.mjs?v=20261109-1";
+
 export const COATING_COLORS = { coated: "#22a06b", uncertain: "#e5b62f", uncoated: "#e9a2a2" };
 export const COATING_LABELS = { coated: "Покрыта", uncertain: "Спорная", uncoated: "Непокрыта" };
 
@@ -65,6 +67,10 @@ export function cropBounds(bbox, imageWidth, imageHeight, padding = .1) {
 export function drawFrames(context, detections, { x = 0, y = 0, scaleX = 1, scaleY = 1, lineWidth = 2 } = {}) {
   context.lineWidth = lineWidth;
   for (const detection of detections) {
+    if (detection.polygon_px) {
+      drawContours(context, [detection], { x, y, scaleX, scaleY, lineWidth });
+      continue;
+    }
     const [x1, y1, x2, y2] = detection.bbox;
     context.strokeStyle = COATING_COLORS[detection.coating_status];
     context.strokeRect(x + x1 * scaleX, y + y1 * scaleY, (x2 - x1) * scaleX, (y2 - y1) * scaleY);
